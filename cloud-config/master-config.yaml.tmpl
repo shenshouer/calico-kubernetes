@@ -1,0 +1,200 @@
+#cloud-config
+---
+write_files:
+  # Network config file for the Calico CNI plugin.
+  - path: /etc/cni/net.d/10-calico.conf 
+    owner: root
+    permissions: 0755
+    content: |
+      {
+          "name": "calico-k8s-network",
+          "type": "calico",
+          "etcd_authority": "172.18.18.101:2379",
+          "log_level": "info",
+          "ipam": {
+              "type": "calico-ipam"
+          }
+      }
+
+  # Kubeconfig file. 
+  - path: /etc/kubernetes/worker-kubeconfig.yaml
+    owner: root
+    permissions: 0755
+    content: |
+      apiVersion: v1
+      kind: Config
+      clusters:
+      - name: local
+        cluster:
+          server: http://172.18.18.101:8080
+      users:
+      - name: kubelet
+      contexts:
+      - context:
+          cluster: local
+          user: kubelet
+        name: kubelet-context
+      current-context: kubelet-context
+
+
+hostname: __HOSTNAMT__
+coreos:
+  update:
+    reboot-strategy: off
+  etcd2:
+    name: "etcdserver"
+    listen-client-urls: http://0.0.0.0:2379
+    advertise-client-urls: http://$private_ipv4:2379
+    initial-cluster: etcdserver=http://$private_ipv4:2380
+    initial-advertise-peer-urls: http://$private_ipv4:2380
+    listen-client-urls: http://0.0.0.0:2379,http://0.0.0.0:4001
+    listen-peer-urls: http://0.0.0.0:2380
+  fleet:
+    metadata: "role=master"
+    etcd_servers: "http://localhost:2379"
+  units:
+    - name: etcd2.service
+      command: start
+    - name: fleet.service
+      command: start
+    - name: setup-network-environment.service
+      command: start
+      content: |
+        [Unit]
+        Description=Setup Network Environment
+        Documentation=https://github.com/kelseyhightower/setup-network-environment
+        Requires=network-online.target
+        After=network-online.target
+        [Service]
+        ExecStartPre=-/usr/bin/chmod +x /opt/bin/setup-network-environment
+        ExecStart=/opt/bin/setup-network-environment
+        RemainAfterExit=yes
+        Type=oneshot
+        [Install]
+        WantedBy=multi-user.target
+    - name: kube-apiserver.service
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes API Server
+        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Requires=etcd2.service
+        After=etcd2.service
+        [Service]
+        ExecStart=/opt/bin/kube-apiserver \
+        --allow-privileged=true \
+        --etcd-servers=http://$private_ipv4:2379 \
+        --admission-control=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota \
+        --insecure-bind-address=0.0.0.0 \
+        --advertise-address=$private_ipv4 \
+        --service-account-key-file=/srv/kubernetes/kubecfg.key \
+        --tls-cert-file=/srv/kubernetes/server.cert \
+        --tls-private-key-file=/srv/kubernetes/server.key \
+        --service-cluster-ip-range=10.100.0.0/16 \
+        --client-ca-file=/srv/kubernetes/ca.crt \
+        --kubelet-https=true \
+        --secure-port=443 \
+        --runtime-config=extensions/v1beta1/daemonsets=true,extensions/v1beta1/deployments=true,extensions/v1beta1/ingress=true \
+        --logtostderr=true
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target
+    - name: kube-controller-manager.service
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Controller Manager
+        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Requires=kube-apiserver.service
+        After=kube-apiserver.service
+        [Service]
+        ExecStart=/opt/bin/kube-controller-manager \
+        --master=$private_ipv4:8080 \
+        --service_account_private_key_file=/srv/kubernetes/kubecfg.key \
+        --root-ca-file=/srv/kubernetes/ca.crt \
+        --logtostderr=true
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target
+    - name: kube-scheduler.service
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Scheduler
+        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Requires=kube-apiserver.service
+        After=kube-apiserver.service
+        [Service]
+        ExecStart=/opt/bin/kube-scheduler --master=$private_ipv4:8080 --logtostderr=true
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target
+    - name: calico-node.service
+      command: start
+      content: |
+        [Unit]
+        Description=calicoctl node
+        After=docker.service
+        Requires=docker.service
+        
+        [Service]
+        #EnvironmentFile=/etc/network-environment
+        User=root
+        Environment="ETCD_AUTHORITY=127.0.0.1:2379"
+        PermissionsStartOnly=true
+        #ExecStartPre=/opt/bin/calicoctl pool add 192.168.0.0/16 --ipip --nat-outgoing
+        ExecStart=/opt/bin/calicoctl node --ip=$private_ipv4 --detach=false
+        Restart=always
+        RestartSec=10
+
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: kubelet.service
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Kubelet
+        Documentation=https://github.com/kubernetes/kubernetes
+        After=docker.service
+        Requires=docker.service
+
+        [Service]
+        ExecStart=/opt/bin/kubelet \
+        --register-node=true \
+        --pod-infra-container-image="shenshouer/pause:0.8.0" \
+        --allow-privileged=true \
+        --config=/opt/kubernetes/manifests \
+        --cluster-dns=10.100.0.10 \
+        --hostname-override=$private_ipv4 \
+        --api-servers=http://localhost:8080 \
+        --cluster-domain=cluster.local \
+        --network-plugin-dir=/etc/cni/net.d \
+        --network-plugin=cni \
+        --logtostderr=true
+        Restart=always
+        RestartSec=10
+
+        [Install]
+        WantedBy=multi-user.target
+
+    - name: kube-proxy.service
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Proxy
+        Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+        Requires=kubelet.service
+        After=kubelet.service
+        [Service]
+        ExecStart=/opt/bin/kube-proxy \
+        --master=http://$private_ipv4:8080 \
+        --proxy-mode=iptables \
+        --logtostderr=true
+        Restart=always
+        RestartSec=10
+        [Install]
+        WantedBy=multi-user.target
