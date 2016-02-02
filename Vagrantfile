@@ -87,6 +87,8 @@ Vagrant.configure("2") do |config|
         # Configure the master.
         system "cp cloud-config/master-config.yaml.tmpl cloud-config/master-config.yaml"
         system "sed -e 's|__HOSTNAMT__|#{vm_name}|g' -i#{sedInplaceArg} ./cloud-config/master-config.yaml"
+        host.vm.provision :file, :source => "./manifests/kube-ui-rc.yaml", :destination => "/home/core/kube-ui-rc.yaml"
+        host.vm.provision :file, :source => "./manifests/kube-ui-svc.yaml", :destination => "/home/core/kube-ui-svc.yaml"
         host.vm.provision :file, :source => "./manifests/skydns.yaml", :destination => "/home/core/skydns.yaml"
         host.vm.provision :file, :source => "./manifests/busybox.yaml", :destination => "/home/core/busybox.yaml"
         host.vm.provision :file, :source => "./cloud-config/master-config.yaml", :destination => "/tmp/vagrantfile-user-data"
